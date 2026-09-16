@@ -1,0 +1,19 @@
+# makepkg generated directories
+xen/
+pkg/
+src/
+
+# Built Arch Linux packages
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.pkg.tar.zst.sig
+*.pkg.tar.xz.sig
+
+# Downloaded source archives (if you ever add any in the future)
+*.tar.gz
+*.tar.xz
+*.zip
+
+# makepkg log files (if you ever use makepkg --log)
+makepkg.log
+*.log

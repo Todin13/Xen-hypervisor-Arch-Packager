@@ -1,0 +1,66 @@
+install_msg() {
+    cat << __EOF__
+====================================================================
+  Xen Hypervisor Installed
+
+  To add this hypervisor to your boot menu, update GRUB:
+    sudo grub-mkconfig -o /boot/grub/grub.cfg
+
+  You may Add this to your /etc/default/grub before:
+    GRUB_CMDLINE_XEN_DEFAULT="dom0_mem=4096M,max:4096M
+    dom0_max_vcpus=4 dom0_vcpus_pin iommu=1 console=vga,com1"
+
+  To manage Dom0 automatically on boot, enable these services:
+    systemctl enable xen-qemu-dom0-disk-backend.service
+    systemctl enable xen-init-dom0.service
+    systemctl enable xenconsoled.service
+
+  Optional: To start domains automatically on boot:
+    systemctl enable xendomains.service
+
+====================================================================
+__EOF__
+}
+
+post_install() {
+    install_msg
+}
+
+post_upgrade() {
+    cat << __EOF__
+  If you changed the hypervisor version or suffix in your PKGBUILD,
+  remember to regenerate your boot menu:
+    sudo grub-mkconfig -o /boot/grub/grub.cfg
+__EOF__
+}
+
+pre_remove() {
+    # We only want to stop and disable services if this is the MAIN package.
+    # We detect this by checking if the pacman database says this specific
+    # package owns the xen systemd files, preventing us from accidentally 
+    # breaking your main install when removing a side-by-side test build.
+
+    if pacman -Qo /usr/lib/systemd/system/xendomains.service &>/dev/null; then
+        systemctl stop xendomains.service || true
+        systemctl stop xen-watchdog.service || true
+        systemctl stop xenconsoled.service || true
+        systemctl stop xen-init-dom0.service || true
+        systemctl stop xen-qemu-dom0-disk-backend.service || true
+
+        systemctl disable xendomains.service || true
+        systemctl disable xen-watchdog.service || true
+        systemctl disable xenconsoled.service || true
+        systemctl disable xen-init-dom0.service || true
+        systemctl disable xen-qemu-dom0-disk-backend.service || true
+    fi
+}
+
+post_remove() {
+    cat << __EOF__
+====================================================================
+  Don't forget to run:
+    sudo grub-mkconfig -o /boot/grub/grub.cfg
+  to cleanly remove this Xen version from your boot menu.
+====================================================================
+__EOF__
+}

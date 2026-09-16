@@ -1,0 +1,11 @@
+[Unit]
+Description=Xen Version Log Separator
+After=xen-init-dom0.service
+ConditionPathExists=/proc/xen/capabilities
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/xen-log-separator.sh
+
+[Install]
+WantedBy=multi-user.target
