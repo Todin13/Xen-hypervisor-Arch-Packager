@@ -4,6 +4,8 @@ This repository contains a highly flexible, configurable `PKGBUILD` designed spe
 
 Rather than hardcoding build variables into the `PKGBUILD`, this project uses a modular configuration system (`build-conf/`) that allows you to easily switch between building upstream releases, compiling your local working directories, and generating side-by-side "hypervisor-only" packages for safe testing.
 
+For this I used and inspired myself of the xen official doc [here](https://wiki.xenproject.org/wiki/Getting_Started) and the [AUR Xen package for arch-linux](https://aur.archlinux.org/xen.git)
+
 ## Key Features for Developers
 
 * **Local Source Compilation:** Point the build system directly at your local Xen Git repository to test uncommitted changes or local branches.
