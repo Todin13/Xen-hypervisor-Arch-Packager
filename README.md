@@ -4,16 +4,16 @@ This repository contains a highly flexible, configurable `PKGBUILD` designed spe
 
 Rather than hardcoding build variables into the `PKGBUILD`, this project uses a modular configuration system (`build-conf/`) that allows you to easily switch between building upstream releases, compiling your local working directories, and generating side-by-side "hypervisor-only" packages for safe testing.
 
-For this I used and inspired myself of the xen official doc [here](https://wiki.xenproject.org/wiki/Getting_Started) and the [AUR Xen package for arch-linux](https://aur.archlinux.org/xen.git)
+For this I used and inspired myself of the xen official doc [here](https://wiki.xenproject.org/wiki/Getting_Started) and the [AUR Xen package for arch-linux](https://aur.archlinux.org/packages/xen) to clone it https://aur.archlinux.org/xen.git
 
-## Key Features for Developers
+## Key Features
 
 * **Local Source Compilation:** Point the build system directly at your local Xen Git repository to test uncommitted changes or local branches.
 * **Side-by-Side Installation:** Define a custom `_build_suffix` (e.g., `-test`) to rename the output package and the Xen EFI/GRUB binary (e.g., `xen-test.gz`), preventing conflicts with your daily-driver hypervisor.
 * **Hypervisor-Only Mode:** Strip out all `dom0` userspace tools (`xl`, `xenstored`, QEMU) from the final package. This allows you to install and boot a modified hypervisor alongside your stable host tools without pacman file conflicts.
 * **Automated Patching:** Drop patch files into the root directory, add them to the config, and they will be applied automatically during the `prepare()` phase.
 * **Debug Builds:** One-line toggle to enable debug symbols and verbose hypervisor output.
-* **Modern Toolchain Fixes:** Built-in compiler flags (`-Wno-error`) to successfully compile Xen and its bundled QEMU device model with modern Arch Linux GCC versions.
+* **Build Fixes:** Built-in compiler flags (`-Wno-error`) to successfully compile Xen bundled QEMU device model with modern Arch Linux GCC versions.
 
 ## Project Structure
 
@@ -31,6 +31,7 @@ For this I used and inspired myself of the xen official doc [here](https://wiki.
 
 ### 1. Prepare your build configuration
 Copy the template to create your local active configuration file:
+    
     cp build-conf/xen-build-template.conf build-conf/xen-custom.conf
 
 
@@ -39,6 +40,7 @@ Edit `build-conf/xen-custom.conf`. Here are two common development workflows:
 
 **Scenario A: Testing a local code branch safely**
 You have a local clone of Xen at `/home/user/code/xen` and want to test a hypervisor change without breaking your host `dom0` tools.
+   
     _use_local_code="true"
     _local_source_path="/home/user/code/xen"
     _build_debug="true"
@@ -47,6 +49,7 @@ You have a local clone of Xen at `/home/user/code/xen` and want to test a hyperv
 
 **Scenario B: Building a specific upstream version with a custom patch**
 You want to build Xen 4.22 with an experimental patch you downloaded.
+    
     _use_local_code="false"
     _xen_version="4.22.0"
     _xen_branch="stable-4.22"
@@ -54,9 +57,11 @@ You want to build Xen 4.22 with an experimental patch you downloaded.
 
 ### 3. Build the package
 Ensure you have the Arch `base-devel` group installed, then run:
+    
     makepkg -s
 
 *Note: If you want to use a config file with a different name/path, you can pass it via an environment variable: `XEN_BUILD_CONF=./my-custom.conf makepkg -s`*
+
 ### 4. Check for Conflicts (Optional but Recommended)
 Before installing the newly built package, you can verify if it will cause file or package conflicts without actually touching your system.
 
@@ -70,12 +75,12 @@ If it errors out complaining about a conflicting file or package, you have a con
 **Manual File-Level Conflict Check**
 To see if the package tries to write a file another package already owns:
 
-    pacman -Qlp xen-mybranch-*.pkg.tar.zst | awk '{print $2}' | while read -r f; do [ -f "$f" ] && owner=$(pacman -Qo "$f" 2>/dev/null) && echo "CONFLICT: $f -> $owner"; done
+    sudo pacman -Qlp xen-mybranch-*.pkg.tar.zst | awk '{print $2}' | while read -r f; do [ -f "$f" ] && owner=$(pacman -Qo "$f" 2>/dev/null) && echo "CONFLICT: $f -> $owner"; done
 
 **Manual Metadata Conflict Check**
 To see what conflicts the package explicitly declares in its metadata:
 
-    pacman -Qip xen-mybranch-*.pkg.tar.zst | grep -E '^(Conflicts|Provides|Replaces)'
+    sudo pacman -Qip xen-mybranch-*.pkg.tar.zst | grep -E '^(Conflicts|Provides|Replaces)'
 
 You can cross-reference the output by checking installed Xen packages with `pacman -Qs '^xen'`.
 
@@ -84,7 +89,30 @@ Once you have verified the package is clean, install it using `pacman`:
 
     sudo pacman -U xen-mybranch-4.22.0-1-x86_64.pkg.tar.zst
 
-Because of the side-by-side features in the `PKGBUILD`, this will install `/boot/xen-mybranch.gz` without overwriting `/boot/xen.gz`. Update your GRUB configuration to add a boot entry for your new hypervisor binary and reboot!
+Because of the side-by-side features in the `PKGBUILD`, this will install `/boot/xen-mybranch.gz` without overwriting `/boot/xen.gz`.
+
+To add it to your boot menu, run the following command:
+    
+    echo 'CONFIG_XEN_DOM0=y' | sudo tee /boot/config-linux
+
+Be aware that it work on a archlinux config knwoing it save the vmlinuz image as vmlinuz-linux so the config file is config-linux if you want to specify it for a specific version of vmlinuz just save this to config-version. \
+And update GRUB:
+    
+    sudo grub-mkconfig -o /boot/grub/grub.cfg
+
+You may Add this to your /etc/default/grub before to specify entry to the xen hypervisor:
+    
+    GRUB_CMDLINE_XEN_DEFAULT="dom0_mem=4096M,max:4096M dom0_max_vcpus=4 dom0_vcpus_pin iommu=1 console=vga,com1"
+
+To manage Dom0 automatically on boot, enable these services:
+    
+    systemctl enable xen-qemu-dom0-disk-backend.service
+    systemctl enable xen-init-dom0.service
+    systemctl enable xenconsoled.service
+
+Optional: To start domains automatically on boot:
+    
+    systemctl enable xendomains.service
 
 ## Notes on the Build Process
 
