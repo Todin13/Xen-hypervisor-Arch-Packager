@@ -83,7 +83,9 @@ build() {
     # We pass Arch Linux's system-wide CFLAGS to ensure optimal compilation
     _make_flags=(
         "BOOT_DIR=${_boot_dir}"
-        "XEN_VENDORVERSION=-${pkgrel}${_build_suffix}"
+        "EFI_DIR=${_efi_dir}"
+        "EFI_MOUNTPOINT=${_efi_mountpoint}"
+        "XEN_VENDORVERSION=-${pkgrel}${_build_suffix}-arch"
         "EXTRA_CFLAGS_XEN_TOOLS=${CFLAGS}"
         "EXTRA_CFLAGS_QEMU_XEN=${CFLAGS} -Wno-error"
     )
@@ -126,7 +128,9 @@ build() {
 package() {
     local _make_flags=(
         "BOOT_DIR=${_boot_dir}"
-        "XEN_VENDORVERSION=-${pkgrel}${_build_suffix}"
+        "EFI_DIR=${_efi_dir}"
+        "EFI_MOUNTPOINT=${_efi_mountpoint}"
+        "XEN_VENDORVERSION=-${pkgrel}${_build_suffix}-arch"
         "EXTRA_CFLAGS_XEN_TOOLS=${CFLAGS}"
         "EXTRA_CFLAGS_QEMU_XEN=${CFLAGS} -Wno-error"
     )
@@ -143,6 +147,11 @@ package() {
     # Clean up legacy runtime directories
     rm -rf "$pkgdir"/var/run
 
+    # Xen bundles its own private QEMU, whose locale files collide with the
+    # system qemu-common package. Purely cosmetic strings — safe to drop,
+    # qemu-common already provides them for any qemu-related messages.
+    rm -rf "${pkgdir}/usr/share/locale"
+
     install -D -m 0644 "${srcdir}/xen.conf" "${pkgdir}/usr/lib/modules-load.d/xen.conf"
     install -D -m 0755 "${srcdir}/xen-log-separator.sh" "${pkgdir}/usr/bin/xen-log-separator.sh"
     install -D -m 0644 "${srcdir}/xen-log-separator.service" "${pkgdir}/usr/lib/systemd/system/xen-log-separator.service"
@@ -155,6 +164,14 @@ package() {
         mv "$(realpath "${pkgdir}/${_boot_dir}/xen.gz")" "${pkgdir}/${_boot_dir}/xen${_build_suffix}.gz"
         # Clean up all the messy default symlinks Xen creates (like xen-4.21.gz)
         find "${pkgdir}/${_boot_dir}" -name "xen*.gz" -type l -delete
+    fi
+
+    # --- SAME TREATMENT FOR .efi ---
+    if [ -f "${pkgdir}/${_efi_dir}/xen.efi" ]; then
+        # Move the real file and give it our custom suffix
+        mv "$(realpath "${pkgdir}/${_efi_dir}/xen.efi")" "${pkgdir}/${_efi_dir}/xen${_build_suffix}.efi"
+        # Clean up all the messy default symlinks Xen creates
+        find "${pkgdir}/${_efi_dir}" -name "xen*.efi" -type l -delete
     fi
 
     if [[ "${_hypervisor_only}" == "true" ]]; then

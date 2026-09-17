@@ -3,7 +3,14 @@ install_msg() {
 ====================================================================
   Xen Hypervisor Installed
 
-  To add this hypervisor to your boot menu, update GRUB:
+  To add this hypervisor to your boot menu, run the following command:
+    echo 'CONFIG_XEN_DOM0=y' | sudo tee /boot/config-linux
+
+  Be aware that it work on a archlinux config knwoing it save the vmlinuz image
+  as vmlinuz-linux so the config file is config-linux if you want to specify it
+  for a specific version of vmlinuz just save this to config-version
+
+  And update GRUB:
     sudo grub-mkconfig -o /boot/grub/grub.cfg
 
   You may Add this to your /etc/default/grub before:
