@@ -1,0 +1,207 @@
+From d575c54b59e46d0a08e108ccebe27141e0be52a7 Mon Sep 17 00:00:00 2001
+Message-ID: <d575c54b59e46d0a08e108ccebe27141e0be52a7.1790337037.git.abdelkareem.abdelsaamad@citrix.com>
+From: Abdelkareem Abdelsaamad <abdelkareem.abdelsaamad@citrix.com>
+To: xen-devel@lists.xenproject.org
+Cc: Jan Beulich <jbeulich@suse.com>
+Cc: Andrew Cooper <andrew.cooper3@citrix.com>
+Cc: "Roger Pau Monné" <roger@xenproject.org>
+Cc: Teddy Astie <teddy.astie@vates.tech>
+Date: Mon, 1 Jun 2026 20:06:35 +0100
+Subject: [PATCH] x86/emulator: Add Linear Address Space Separation (LASS)
+ support
+
+Linear Address Space Separation (LASS) is an architectural security feature
+that is intended to prevent cross userspace/kernelspace memory boundary access
+with the CPU hardware support. Unlike the related mode-based paging protections
+such as the Supervisor Mode Access Prevention (SMAP) and the Supervisor Mode
+Execution Prevention (SMEP), LASS provides the efficient mechanism to guard
+against the cross memory boundary accesses without traversing the paging
+structures. This provides a more efficient guarding mechanism against the class
+of malicious software attacks that relies on paging-based timing information,
+see (1) for more information. Enlighten the x86 instruction emulator to comply
+with the hardware Intel's CPU support for the LASS.
+
+The LASS violation check logic is ported from the reviewed logic in the Linux
+KVM mailing list (2) for the LASS violation checks.
+
+[1] https://cdrdv2-public.intel.com/774990/architecture-instruction-set-extensions-programming-reference.pdf
+[2] https://lwn.net/ml/linux-kernel/20230913124227.12574-16-binbin.wu@linux.intel.com/
+---
+Testing:
+ - With A virtual machine setup with installing the fedora rawhide/f45 development
+   branch which is based on the Linux kernel 7.1, I verified the following test cases
+   1- Using the Xen Server, I enabled the lass cpu fetaure. Running the command
+      grep 'lass' /proc/cpuinfo
+      is successfully reporting and verifying lass is supported by the guest kernel.
+
+   2- On the setup guest, I wrote the following code to verify the kernelspace linear
+      address access from userspace is prevented with #GP. Disabling lass from the guest
+      and commenting the FEP is rather reporting #PF.
+
+      int main(void){
+          char usrspace_buf[16] = {0};
+          char* usrspace = usrspace_buf;
+          char* kernspace = (char*) 0xffff800000000000;
+
+          asm volatile (
+              ".byte 0x0f, 0x0b, 0x78, 0x65, 0x6e\n\t"
+              "rep movsb"
+              : "+S" (usrspace), "+D" (kernspace)
+              : "c" (16)
+              : "memory"
+          );
+
+          return 0;
+      }
+
+
+   3- On the setup guest, I wrote the following kernel module to verify the userspace linear
+      address access from the kernelspace is prevented with #GP. Disabling lass from the guest
+      is rather reprting #PF. Executing the code with commentted Forced Emulation Prefix
+      (FEP) and the lass feature enabled is reporting #GP.
+
+      #include <linux/module.h>
+      #include <linux/slab.h>
+
+      MODULE_LICENSE("GPL");
+      MODULE_DESCRIPTION("Testing Module for Intel's LASS Xen Trap");
+
+      static int __init my_module_init(void){
+          char* usrspace = (char*) 0x00007ffffffffd00;
+          char* kernspace = kzalloc(16, GFP_KERNEL);
+
+          if (!kernspace) {
+              pr_err("Memory allocation failed\n");
+              return -ENOMEM;
+          }
+
+          asm volatile (
+          ".byte 0x0f, 0x0b, 0x78, 0x65, 0x6e\n\t"
+          "rep movsb"
+          : "+S" (usrspace), "+D" (kernspace)
+          : "c" (16)
+          : "memory"
+          );
+
+          return 0;
+      }
+
+      static void __exit my_module_exit(void){
+          pr_info("my module ");
+      }
+
+      module_init(my_module_init);
+      module_exit(my_module_exit);
+
+   4- On the setup guest, I wrote the following code to verify the implicit system (spervisor)
+      address access from userspace is not prevented with #GP.
+
+      #include <stdio.h>
+
+      #define XEN_FEP ".byte 0x0f, 0x0b, 0x78, 0x65, 0x6e\n\t"
+
+      int main() {
+          asm volatile (XEN_FEP "mov %[sel], %%fs" :: [sel] "r" (15*8+3));
+          return 0;
+      }
+---
+ xen/arch/x86/hvm/hvm.c | 73 ++++++++++++++++++++++++++++++++----------
+ 1 file changed, 56 insertions(+), 17 deletions(-)
+
+diff --git a/xen/arch/x86/hvm/hvm.c b/xen/arch/x86/hvm/hvm.c
+index d62f0b3866..e5344dc5b1 100644
+--- a/xen/arch/x86/hvm/hvm.c
++++ b/xen/arch/x86/hvm/hvm.c
+@@ -2557,6 +2557,40 @@ int hvm_set_cr4(unsigned long value, bool may_defer)
+     return X86EMUL_OKAY;
+ }
+ 
++static bool is_lass_violation(struct vcpu *v, unsigned long addr,
++                              unsigned long size,
++                              enum hvm_access_type access_type,
++                              bool is_implicit_supervisor_access)
++{
++    const bool is_supervisor_address = !!(addr & (1ULL << 63));
++
++    if ( !(v->arch.hvm.guest_cr[4] & X86_CR4_LASS) || !hvm_long_mode_active(v) )
++        return false;
++
++    if ( !is_implicit_supervisor_access && hvm_get_cpl(v) == 3 )
++        return is_supervisor_address;
++
++    /*
++     * In the subsequent logic, we are emulating a verified supervisor
++     * access LASS check.
++     */
++
++    if ( access_type != hvm_access_insn_fetch )
++    {
++        if ( !(v->arch.hvm.guest_cr[4] & X86_CR4_SMAP) )
++            return false;
++
++        if ( !is_implicit_supervisor_access &&
++             guest_cpu_user_regs()->eflags & X86_EFLAGS_AC )
++            return false;
++    }
++
++    if ( size && !((addr + size - 1) & (1ULL << 63)) )
++        return true;
++
++    return !is_supervisor_address;
++}
++
+ bool hvm_vcpu_virtual_to_linear(
+     struct vcpu *v,
+     enum x86_segment seg,
+@@ -2602,26 +2636,31 @@ bool hvm_vcpu_virtual_to_linear(
+         if ( max(offset, last_byte) >> 16 )
+             goto out;
+     }
+-    else if ( hvm_long_mode_active(v) &&
+-              (is_x86_system_segment(seg) || active_cs->l) )
++    else if ( hvm_long_mode_active(v) )
+     {
+-        /*
+-         * User segments are always treated as present.  System segment may
+-         * not be, and also incur limit checks.
+-         */
+-        if ( is_x86_system_segment(seg) &&
+-             (!reg->p || (offset + bytes - !!bytes) > reg->limit) )
+-            goto out;
++        if ( (is_x86_system_segment(seg) || active_cs->l) )
++        {
++            /*
++             * User segments are always treated as present.  System segment may
++             * not be, and also incur limit checks.
++             */
++             if ( is_x86_system_segment(seg) &&
++                  (!reg->p || (offset + bytes - !!bytes) > reg->limit) )
++                 goto out;
+ 
+-        /*
+-         * LONG MODE: FS, GS and system segments: add segment base. All
+-         * addresses must be canonical.
+-         */
+-        if ( seg >= x86_seg_fs )
+-            addr += reg->base;
++            /*
++             * LONG MODE: FS, GS and system segments: add segment base. All
++             * addresses must be canonical.
++             */
++            if ( seg >= x86_seg_fs )
++                addr += reg->base;
++
++            last_byte = addr + bytes - !!bytes;
++            if ( !is_canonical_address((long)addr < 0 ? addr : last_byte) )
++                goto out;
++        }
+ 
+-        last_byte = addr + bytes - !!bytes;
+-        if ( !is_canonical_address((long)addr < 0 ? addr : last_byte) )
++        if ( is_lass_violation(v, addr, bytes, access_type, is_x86_system_segment(seg)) )
+             goto out;
+     }
+     else
+-- 
+2.53.0
+
