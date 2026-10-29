@@ -1,0 +1,130 @@
+Date:    Thu, 15 Oct 2026 21:05:30 +0000
+From:    Andrew Cooper <andrew.cooper3@citrix.com>
+To:      Xen-devel <xen-devel@lists.xenproject.org>
+Cc:      Andrew Cooper <andrew.cooper3@citrix.com>, Jan Beulich <jbeulich@suse.com>, Roger Pau Monné <roger@xenproject.org>, Teddy Astie <teddy.astie@vates.tech>
+Subject: [PATCH v4 5/5] x86/spec-ctrl: Introduce and use DO_COND_BHB_SEQ
+
+------------------------------------------------------------------------
+
+Now that alternatives can fix up call displacements even when they're not the
+first instruction of the replacement, move the SCF_entry_bhb conditional
+inside the replacement block.
+
+This removes a conditional branch from the fastpaths of BHI-unaffected
+hardware.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+---
+CC: Jan Beulich <jbeulich@suse.com>
+CC: Roger Pau Monné <roger@xenproject.org>
+CC: Teddy Astie <teddy.astie@vates.tech>
+---
+ xen/arch/x86/hvm/vmx/entry.S             | 12 +++----
+ xen/arch/x86/include/asm/spec_ctrl_asm.h | 43 +++++++++++++-----------
+ 2 files changed, 30 insertions(+), 25 deletions(-)
+
+diff --git a/xen/arch/x86/hvm/vmx/entry.S b/xen/arch/x86/hvm/vmx/entry.S
+index cebc70064048..76508c0de2f3 100644
+--- a/xen/arch/x86/hvm/vmx/entry.S
++++ b/xen/arch/x86/hvm/vmx/entry.S
+@@ -59,12 +59,12 @@ FUNC(vmx_asm_vmexit_handler)
+          * Clear the BHB to mitigate BHI.  Used on eIBRS parts, and uses RETs
+          * itself so must be after we've perfomed all the RET-safety we can.
+          */
+-        testb $SCF_entry_bhb, CPUINFO_scf(%rsp)
+-        jz .L_skip_bhb
+-        ALTERNATIVE_2 "",                                    \
+-            "call clear_bhb_loops", X86_SPEC_BHB_LOOPS,      \
+-            "call clear_bhb_tsx", X86_SPEC_BHB_TSX
+-.L_skip_bhb:
++        .macro VMX_BHB_SEQ fn:req
++            DO_COND_BHB_SEQ \fn scf=CPUINFO_scf(%rsp)
++        .endm
++        ALTERNATIVE_2 "",                                         \
++            "VMX_BHB_SEQ fn=clear_bhb_loops", X86_SPEC_BHB_LOOPS, \
++            "VMX_BHB_SEQ fn=clear_bhb_tsx",   X86_SPEC_BHB_TSX
+ 
+         ALTERNATIVE "lfence", "", X86_SPEC_NO_LFENCE_ENTRY_VMX
+         /* WARNING! `ret`, `call *`, `jmp *` not safe before this point. */
+diff --git a/xen/arch/x86/include/asm/spec_ctrl_asm.h b/xen/arch/x86/include/asm/spec_ctrl_asm.h
+index abb64ad2b7f9..780ec57f4553 100644
+--- a/xen/arch/x86/include/asm/spec_ctrl_asm.h
++++ b/xen/arch/x86/include/asm/spec_ctrl_asm.h
+@@ -92,6 +92,21 @@
+ .L\@_skip:
+ .endm
+ 
++.macro DO_COND_BHB_SEQ fn:req, scf=%bl
++/*
++ * Requires SCF (defaults to %rbx), fn=clear_bhb_{loops,tsx}
++ * Clobbers %rax, %rcx
++ *
++ * Conditionally use a BHB clearing software sequence.
++ */
++    testb  $SCF_entry_bhb, \scf
++    jz     .L\@_skip_bhb
++
++    call   \fn
++
++.L\@_skip_bhb:
++.endm
++
+ .macro DO_OVERWRITE_RSB tmp=rax, xu
+ /*
+  * Requires nothing
+@@ -277,12 +292,9 @@
+      * Clear the BHB to mitigate BHI.  Used on eIBRS parts, and uses RETs
+      * itself so must be after we've perfomed all the RET-safety we can.
+      */
+-    testb $SCF_entry_bhb, %bl
+-    jz .L\@_skip_bhb
+-    ALTERNATIVE_2 "",                                    \
+-        "call clear_bhb_loops", X86_SPEC_BHB_LOOPS,      \
+-        "call clear_bhb_tsx", X86_SPEC_BHB_TSX
+-.L\@_skip_bhb:
++    ALTERNATIVE_2 "",                                          \
++        "DO_COND_BHB_SEQ clear_bhb_loops", X86_SPEC_BHB_LOOPS, \
++        "DO_COND_BHB_SEQ clear_bhb_tsx",   X86_SPEC_BHB_TSX
+ 
+     ALTERNATIVE "lfence", "", X86_SPEC_NO_LFENCE_ENTRY_PV
+ .endm
+@@ -322,12 +334,9 @@
+     ALTERNATIVE "", __stringify(DO_SPEC_CTRL_ENTRY maybexen=1),         \
+         X86_FEATURE_SC_MSR_PV
+ 
+-    testb $SCF_entry_bhb, %bl
+-    jz .L\@_skip_bhb
+-    ALTERNATIVE_2 "",                                    \
+-        "call clear_bhb_loops", X86_SPEC_BHB_LOOPS,      \
+-        "call clear_bhb_tsx", X86_SPEC_BHB_TSX
+-.L\@_skip_bhb:
++    ALTERNATIVE_2 "",                                          \
++        "DO_COND_BHB_SEQ clear_bhb_loops", X86_SPEC_BHB_LOOPS, \
++        "DO_COND_BHB_SEQ clear_bhb_tsx",   X86_SPEC_BHB_TSX
+ 
+     ALTERNATIVE "lfence", "", X86_SPEC_NO_LFENCE_ENTRY_INTR
+ .endm
+@@ -433,13 +442,9 @@
+      * Clear the BHB to mitigate BHI.  Used on eIBRS parts, and uses RETs
+      * itself so must be after we've perfomed all the RET-safety we can.
+      */
+-    testb $SCF_entry_bhb, %bl
+-    jz .L\@_skip_bhb
+-
+-    ALTERNATIVE_2 "",                                    \
+-        "call clear_bhb_loops", X86_SPEC_BHB_LOOPS,      \
+-        "call clear_bhb_tsx", X86_SPEC_BHB_TSX
+-.L\@_skip_bhb:
++    ALTERNATIVE_2 "",                                          \
++        "DO_COND_BHB_SEQ clear_bhb_loops", X86_SPEC_BHB_LOOPS, \
++        "DO_COND_BHB_SEQ clear_bhb_tsx",   X86_SPEC_BHB_TSX
+ 
+     lfence
+ .endm
+-- 
+2.39.5
+
+
+
+

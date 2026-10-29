@@ -1,0 +1,99 @@
+Date:    Thu, 15 Oct 2026 21:05:29 +0000
+From:    Andrew Cooper <andrew.cooper3@citrix.com>
+To:      Xen-devel <xen-devel@lists.xenproject.org>
+Cc:      Andrew Cooper <andrew.cooper3@citrix.com>, Jan Beulich <jbeulich@suse.com>, Roger Pau Monné <roger@xenproject.org>, Teddy Astie <teddy.astie@vates.tech>
+Subject: [PATCH v4 4/5] x86/alternative: Relocate all insn-relative fields
+
+------------------------------------------------------------------------
+
+Right now, relocation of displacements is restricted to finding 0xe8/e9 as the
+first byte of the replacement, but this is overly restrictive.
+
+Use x86_decode_lite() to find and adjust all insn-relative fields.
+
+As with disp8's not leaving the replacemnet block, some disp32's don't either.
+e.g. the RSB stuffing loop.  These stay unmodified.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+Reviewed-by: Jan Beulich <jbeulich@suse.com>
+---
+CC: Jan Beulich <jbeulich@suse.com>
+CC: Roger Pau Monné <roger@xenproject.org>
+CC: Teddy Astie <teddy.astie@vates.tech>
+
+v4:
+ * Rebase
+
+v3:
+ * Rebase over the split-out of altcall.  Substantially simpler.
+---
+ xen/arch/x86/alternative.c | 50 +++++++++++++++++++++++++++++++-------
+ 1 file changed, 41 insertions(+), 9 deletions(-)
+
+diff --git a/xen/arch/x86/alternative.c b/xen/arch/x86/alternative.c
+index 6b5f9c94f6dd..aa7da97f8548 100644
+--- a/xen/arch/x86/alternative.c
++++ b/xen/arch/x86/alternative.c
+@@ -341,15 +341,47 @@ static int init_or_livepatch _apply_alternatives(struct alt_instr *start,
+ 
+         memcpy(buf, repl, a->repl_len);
+ 
+-        /* 0xe8/0xe9 are relative branches; fix the offset. */
+-        if ( a->repl_len >= 5 && (*buf & 0xfe) == 0xe8 )
+-            *(int32_t *)(buf + 1) += (long)repl - (long)orig;
+-        else if ( IS_ENABLED(CONFIG_RETURN_THUNK) &&
+-                  a->repl_len > 5 && buf[a->repl_len - 5] == 0xe9 &&
+-                  ((long)repl + a->repl_len +
+-                   *(int32_t *)(buf + a->repl_len - 4) ==
+-                   (long)__x86_return_thunk) )
+-            *(int32_t *)(buf + a->repl_len - 4) += (long)repl - (long)orig;
++        /*
++         * Walk buf[] and adjust any insn-relative operands which leave the
++         * replacement block.
++         */
++        if ( a->repl_len )
++        {
++            uint8_t *ip = buf, *repl_end = ip + a->repl_len;
++
++            for ( x86_decode_lite_t res; ip < repl_end; ip += res.len )
++            {
++                int32_t *d32;
++                const uint8_t *target;
++
++                res = x86_decode_lite(ip, repl_end);
++
++                if ( res.len == 0 )
++                {
++                    printk("Alt for %ps [%*ph]\n"
++                           "  Unable to decode instruction at +%lu in alternative\n",
++                           ALT_ORIG_PTR(a), a->repl_len, repl, ip - repl);
++                    return -EINVAL;
++                }
++
++                if ( res.rel_sz != 4 )
++                    continue;
++
++                d32 = res.rel;
++                target = ip + res.len + *d32;
++
++                if ( target >= buf && target <= repl_end )
++                {
++                    /*
++                     * Target doesn't leave the replacement block.  e.g. RSB
++                     * stuffing.  Leave it unmodified.
++                     */
++                    continue;
++                }
++
++                *d32 += (long)repl - (long)orig;
++            }
++        }
+ 
+         a->priv = 1;
+ 
+-- 
+2.39.5
+
+
+
+

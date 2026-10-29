@@ -1,0 +1,193 @@
+Date:    Tue, 30 Dec 2025 13:54:25 +0000
+From:    Andrew Cooper <andrew.cooper3@citrix.com>
+To:      Xen-devel <xen-devel@lists.xenproject.org>
+Cc:      Andrew Cooper <andrew.cooper3@citrix.com>, Jan Beulich <JBeulich@suse.com>, Roger Pau Monné <roger.pau@citrix.com>
+Subject: [PATCH 2/4] x86/xstate: Rework XSAVE/XRSTOR given a newer toolchain baseline
+
+------------------------------------------------------------------------
+
+The new toolchain baseline knows all the mnemonics, so a plain memory operand
+can be used, rather than needing to hard-code the ModRM byte as (%rdi).
+
+For xrstor(), use asm goto rather than hiding the increment of the faults
+variable inside the .fixup section.  Remove the loop and replace it with a
+goto retry pattern.  Put the domain_crash() into the default case for fault
+handling, and provide a concrete error message rather than leaving it as an
+exercise for extra code diving.
+
+No functional change.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+---
+CC: Jan Beulich <JBeulich@suse.com>
+CC: Roger Pau Monné <roger.pau@citrix.com>
+---
+ xen/arch/x86/xstate.c | 77 ++++++++++++++++++++-----------------------
+ 1 file changed, 36 insertions(+), 41 deletions(-)
+
+diff --git a/xen/arch/x86/xstate.c b/xen/arch/x86/xstate.c
+index 384f78bd5281..4215a83efefb 100644
+--- a/xen/arch/x86/xstate.c
++++ b/xen/arch/x86/xstate.c
+@@ -310,21 +310,21 @@ void xsave(struct vcpu *v, uint64_t mask)
+     uint32_t hmask = mask >> 32;
+     uint32_t lmask = mask;
+     unsigned int fip_width = v->domain->arch.x87_fip_width;
+-#define XSAVE(pfx) \
+-        if ( v->arch.xcr0_accum & XSTATE_XSAVES_ONLY ) \
+-            asm volatile ( ".byte " pfx "0x0f,0xc7,0x2f\n" /* xsaves */ \
+-                           : "=m" (*ptr) \
+-                           : "a" (lmask), "d" (hmask), "D" (ptr) ); \
+-        else \
+-            alternative_io(".byte " pfx "0x0f,0xae,0x27\n", /* xsave */ \
+-                           ".byte " pfx "0x0f,0xae,0x37\n", /* xsaveopt */ \
+-                           X86_FEATURE_XSAVEOPT, \
+-                           "=m" (*ptr), \
+-                           "a" (lmask), "d" (hmask), "D" (ptr))
++
++#define XSAVE(pfx)                                                      \
++    if ( v->arch.xcr0_accum & XSTATE_XSAVES_ONLY )                      \
++        asm volatile ( "xsaves %0"                                      \
++                       : "=m" (*ptr)                                    \
++                       : "a" (lmask), "d" (hmask) );                    \
++    else                                                                \
++        alternative_io("xsave %0",                                      \
++                       "xsaveopt %0", X86_FEATURE_XSAVEOPT,             \
++                       "=m" (*ptr),                                     \
++                       "a" (lmask), "d" (hmask))
+ 
+     if ( fip_width == 8 || !(mask & X86_XCR0_X87) )
+     {
+-        XSAVE("0x48,");
++        XSAVE("rex64 ");
+     }
+     else if ( fip_width == 4 )
+     {
+@@ -349,7 +349,7 @@ void xsave(struct vcpu *v, uint64_t mask)
+ 
+         ptr->fpu_sse.fip.addr = bad_fip;
+ 
+-        XSAVE("0x48,");
++        XSAVE("rex64 ");
+ 
+         /* FIP/FDP not updated? Restore the old FIP value. */
+         if ( ptr->fpu_sse.fip.addr == bad_fip )
+@@ -384,7 +384,7 @@ void xrstor(struct vcpu *v, uint64_t mask)
+     uint32_t hmask = mask >> 32;
+     uint32_t lmask = mask;
+     struct xsave_struct *ptr = v->arch.xsave_area;
+-    unsigned int faults, prev_faults;
++    unsigned int faults = 0;
+ 
+     /*
+      * Some CPUs don't save/restore FDP/FIP/FOP unless an exception
+@@ -405,22 +405,15 @@ void xrstor(struct vcpu *v, uint64_t mask)
+      * possibility, which may occur if the block was passed to us by control
+      * tools or through VCPUOP_initialise, by silently adjusting state.
+      */
+-    for ( prev_faults = faults = 0; ; prev_faults = faults )
+-    {
++ retry:
+     switch ( __builtin_expect(ptr->fpu_sse.x[FPU_WORD_SIZE_OFFSET], 8) )
+     {
+-        BUILD_BUG_ON(sizeof(faults) != 4); /* Clang doesn't support %z in asm. */
+-#define _xrstor(insn)                                               \
+-        asm volatile ( "1: .byte " insn "\n"                        \
+-                       "3:\n"                                       \
+-                       "   .section .fixup,\"ax\"\n"                \
+-                       "2: incl %[faults]\n"                        \
+-                       "   jmp 3b\n"                                \
+-                       "   .previous\n"                             \
+-                       _ASM_EXTABLE(1b, 2b)                         \
+-                       : [mem] "+m" (*ptr), [faults] "+g" (faults)  \
+-                       : [lmask] "a" (lmask), [hmask] "d" (hmask),  \
+-                         [ptr] "D" (ptr) )
++#define _xrstor(insn)                                       \
++        asm_inline volatile goto (                          \
++            "1: " insn " %0\n"                              \
++            _ASM_EXTABLE(1b, %l[fault])                     \
++            :: "m" (*ptr), "a" (lmask), "d" (hmask)         \
++            :: fault )
+ 
+ #define XRSTOR(pfx) \
+         if ( v->arch.xcr0_accum & XSTATE_XSAVES_ONLY ) \
+@@ -432,13 +425,13 @@ void xrstor(struct vcpu *v, uint64_t mask)
+                 ptr->xsave_hdr.xcomp_bv = ptr->xsave_hdr.xstate_bv | \
+                                           XSTATE_COMPACTION_ENABLED; \
+             } \
+-            _xrstor(pfx "0x0f,0xc7,0x1f"); /* xrstors */ \
++            _xrstor(pfx "xrstors"); \
+         } \
+         else \
+-            _xrstor(pfx "0x0f,0xae,0x2f") /* xrstor */
++            _xrstor(pfx "xrstor")
+ 
+     default:
+-        XRSTOR("0x48,");
++        XRSTOR("rex64 ");
+         break;
+ 
+     case 4: case 2:
+@@ -449,8 +442,10 @@ void xrstor(struct vcpu *v, uint64_t mask)
+ #undef _xrstor
+     }
+ 
+-    if ( likely(faults == prev_faults) )
+-        break;
++    return;
++
++ fault:
++    faults++;
+ 
+ #ifndef NDEBUG
+     gprintk(XENLOG_WARNING, "fault#%u: mxcsr=%08x\n",
+@@ -489,17 +484,17 @@ void xrstor(struct vcpu *v, uint64_t mask)
+             ptr->xsave_hdr.xcomp_bv = 0;
+         }
+         memset(ptr->xsave_hdr.reserved, 0, sizeof(ptr->xsave_hdr.reserved));
+-        continue;
++        goto retry;
+ 
+     case 2: /* Stage 2: Reset all state. */
+         ptr->fpu_sse.mxcsr = MXCSR_DEFAULT;
+         ptr->xsave_hdr.xstate_bv = 0;
+         ptr->xsave_hdr.xcomp_bv = v->arch.xcr0_accum & XSTATE_XSAVES_ONLY
+             ? XSTATE_COMPACTION_ENABLED : 0;
+-        continue;
+-    }
++        goto retry;
+ 
+-        domain_crash(current->domain);
++    default: /* Stage 3: Nothing else to do. */
++        domain_crash(v->domain, "Uncorrectable XRSTOR fault\n");
+         return;
+     }
+ }
+@@ -1041,17 +1036,17 @@ uint64_t read_bndcfgu(void)
+ 
+     if ( cpu_has_xsavec )
+     {
+-        asm ( ".byte 0x0f,0xc7,0x27\n" /* xsavec */
++        asm ( "xsavec %0"
+               : "=m" (*xstate)
+-              : "a" (X86_XCR0_BNDCSR), "d" (0), "D" (xstate) );
++              : "a" (X86_XCR0_BNDCSR), "d" (0) );
+ 
+         bndcsr = (void *)(xstate + 1);
+     }
+     else
+     {
+-        asm ( ".byte 0x0f,0xae,0x27\n" /* xsave */
++        asm ( "xsave %0"
+               : "=m" (*xstate)
+-              : "a" (X86_XCR0_BNDCSR), "d" (0), "D" (xstate) );
++              : "a" (X86_XCR0_BNDCSR), "d" (0) );
+ 
+         bndcsr = (void *)xstate + xstate_offsets[ilog2(X86_XCR0_BNDCSR)];
+     }
+-- 
+2.39.5
+
+
+
+

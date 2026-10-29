@@ -1,0 +1,176 @@
+Date:    Tue, 30 Dec 2025 13:54:27 +0000
+From:    Andrew Cooper <andrew.cooper3@citrix.com>
+To:      Xen-devel <xen-devel@lists.xenproject.org>
+Cc:      Andrew Cooper <andrew.cooper3@citrix.com>, Jan Beulich <JBeulich@suse.com>, Roger Pau Monné <roger.pau@citrix.com>
+Subject: [PATCH 4/4] x86: Avoid using .byte for instructions where safe to do so
+
+------------------------------------------------------------------------
+
+The new toolchain baseline knows all of these instructions.
+
+For the remaining uses of .byte for instructions, annotate the toolchain
+minima.
+
+No functional change.
+
+Signed-off-by: Andrew Cooper <andrew.cooper3@citrix.com>
+---
+CC: Jan Beulich <JBeulich@suse.com>
+CC: Roger Pau Monné <roger.pau@citrix.com>
+---
+ xen/arch/x86/arch.mk                   |  4 +++
+ xen/arch/x86/include/asm/asm-defns.h   |  4 ---
+ xen/arch/x86/include/asm/msr.h         |  2 ++
+ xen/arch/x86/include/asm/prot-key.h    |  6 ++---
+ xen/arch/x86/include/asm/xstate.h      |  3 +--
+ xen/arch/x86/x86_emulate/0f01.c        |  2 +-
+ xen/arch/x86/x86_emulate/x86_emulate.c | 34 ++++++++++++--------------
+ 7 files changed, 26 insertions(+), 29 deletions(-)
+
+diff --git a/xen/arch/x86/arch.mk b/xen/arch/x86/arch.mk
+index 0203138a819a..3d8d9bfe4916 100644
+--- a/xen/arch/x86/arch.mk
++++ b/xen/arch/x86/arch.mk
+@@ -16,7 +16,11 @@ CFLAGS-$(CONFIG_CC_IS_GCC) += -malign-data=abi
+ $(call cc-options-add,CFLAGS,CC,$(EMBEDDED_EXTRA_CFLAGS))
+ $(call cc-option-add,CFLAGS,CC,-Wnested-externs)
+ $(call as-option-add,CFLAGS,CC,".equ \"x\"$(comma)1",-DHAVE_AS_QUOTED_SYM)
++
++# Binutils >= 2.31, Clang >= 7
+ $(call as-option-add,CFLAGS,CC,"movdiri %rax$(comma)(%rax)",-DHAVE_AS_MOVDIR)
++
++# Binutils >= 2.33, Clang >= 9
+ $(call as-option-add,CFLAGS,CC,"enqcmd (%rax)$(comma)%rax",-DHAVE_AS_ENQCMD)
+ 
+ # Check to see whether the assembler supports the .nop directive.
+diff --git a/xen/arch/x86/include/asm/asm-defns.h b/xen/arch/x86/include/asm/asm-defns.h
+index 239dc3af096c..f6fe4596a852 100644
+--- a/xen/arch/x86/include/asm/asm-defns.h
++++ b/xen/arch/x86/include/asm/asm-defns.h
+@@ -1,9 +1,5 @@
+ #include <asm/page-bits.h>
+ 
+-.macro clzero
+-    .byte 0x0f, 0x01, 0xfc
+-.endm
+-
+ /* binutils >= 2.41 or LLVM >= 19 */
+ .macro eretu
+     .byte 0xf3, 0x0f, 0x01, 0xca
+diff --git a/xen/arch/x86/include/asm/msr.h b/xen/arch/x86/include/asm/msr.h
+index 941a7612f4ba..1377d156f4e1 100644
+--- a/xen/arch/x86/include/asm/msr.h
++++ b/xen/arch/x86/include/asm/msr.h
+@@ -63,6 +63,8 @@ static inline void wrmsrns(uint32_t msr, uint64_t val)
+     /*
+      * WRMSR is 2 bytes.  WRMSRNS is 3 bytes.  Pad WRMSR with a redundant CS
+      * prefix to avoid a trailing NOP.
++     *
++     * Binutils >= 2.40, Clang >= 16
+      */
+     alternative_input(".byte 0x2e; wrmsr",
+                       ".byte 0x0f,0x01,0xc6", X86_FEATURE_WRMSRNS,
+diff --git a/xen/arch/x86/include/asm/prot-key.h b/xen/arch/x86/include/asm/prot-key.h
+index 8fb15b5c32e9..1752756fd9c1 100644
+--- a/xen/arch/x86/include/asm/prot-key.h
++++ b/xen/arch/x86/include/asm/prot-key.h
+@@ -19,16 +19,14 @@ static inline uint32_t rdpkru(void)
+ {
+     uint32_t pkru;
+ 
+-    asm volatile ( ".byte 0x0f,0x01,0xee"
+-                   : "=a" (pkru) : "c" (0) : "dx" );
++    asm volatile ( "rdpkru" : "=a" (pkru) : "c" (0) : "dx" );
+ 
+     return pkru;
+ }
+ 
+ static inline void wrpkru(uint32_t pkru)
+ {
+-    asm volatile ( ".byte 0x0f,0x01,0xef"
+-                   :: "a" (pkru), "d" (0), "c" (0) );
++    asm volatile ( "wrpkru" :: "a" (pkru), "d" (0), "c" (0) );
+ }
+ 
+ /*
+diff --git a/xen/arch/x86/include/asm/xstate.h b/xen/arch/x86/include/asm/xstate.h
+index e3b9745543d7..9cfee1fa9c5a 100644
+--- a/xen/arch/x86/include/asm/xstate.h
++++ b/xen/arch/x86/include/asm/xstate.h
+@@ -120,8 +120,7 @@ static inline uint64_t xgetbv(unsigned int index)
+     uint32_t lo, hi;
+ 
+     ASSERT(index); /* get_xcr0() should be used instead. */
+-    asm volatile ( ".byte 0x0f,0x01,0xd0" /* xgetbv */
+-                   : "=a" (lo), "=d" (hi) : "c" (index) );
++    asm volatile ( "xgetbv" : "=a" (lo), "=d" (hi) : "c" (index) );
+ 
+     return lo | ((uint64_t)hi << 32);
+ }
+diff --git a/xen/arch/x86/x86_emulate/0f01.c b/xen/arch/x86/x86_emulate/0f01.c
+index 1ba99609d6fd..4791465fc83f 100644
+--- a/xen/arch/x86/x86_emulate/0f01.c
++++ b/xen/arch/x86/x86_emulate/0f01.c
+@@ -122,7 +122,7 @@ int x86emul_0f01(struct x86_emulate_state *s,
+         {
+         case vex_none: /* serialize */
+             host_and_vcpu_must_have(serialize);
+-            asm volatile ( ".byte 0x0f, 0x01, 0xe8" );
++            asm volatile ( ".byte 0x0f, 0x01, 0xe8" ); /* Binutils >= 2.34, Clang >= 11 */
+             break;
+         case vex_f2: /* xsusldtrk */
+             vcpu_must_have(tsxldtrk);
+diff --git a/xen/arch/x86/x86_emulate/x86_emulate.c b/xen/arch/x86/x86_emulate/x86_emulate.c
+index d830aea430d4..a3b7142fde7e 100644
+--- a/xen/arch/x86/x86_emulate/x86_emulate.c
++++ b/xen/arch/x86/x86_emulate/x86_emulate.c
+@@ -4748,27 +4748,25 @@ x86_emulate(
+                  */
+                 if ( vex.l )
+                 {
+-                    /* vpxor %xmmN, %xmmN, %xmmN */
+-                    asm volatile ( ".byte 0xc5,0xf9,0xef,0xc0" );
+-                    asm volatile ( ".byte 0xc5,0xf1,0xef,0xc9" );
+-                    asm volatile ( ".byte 0xc5,0xe9,0xef,0xd2" );
+-                    asm volatile ( ".byte 0xc5,0xe1,0xef,0xdb" );
+-                    asm volatile ( ".byte 0xc5,0xd9,0xef,0xe4" );
+-                    asm volatile ( ".byte 0xc5,0xd1,0xef,0xed" );
+-                    asm volatile ( ".byte 0xc5,0xc9,0xef,0xf6" );
+-                    asm volatile ( ".byte 0xc5,0xc1,0xef,0xff" );
++                    asm volatile ( "vpxor %xmm0, %xmm0, %xmm0" );
++                    asm volatile ( "vpxor %xmm1, %xmm1, %xmm1" );
++                    asm volatile ( "vpxor %xmm2, %xmm2, %xmm2" );
++                    asm volatile ( "vpxor %xmm3, %xmm3, %xmm3" );
++                    asm volatile ( "vpxor %xmm4, %xmm4, %xmm4" );
++                    asm volatile ( "vpxor %xmm5, %xmm5, %xmm5" );
++                    asm volatile ( "vpxor %xmm6, %xmm6, %xmm6" );
++                    asm volatile ( "vpxor %xmm7, %xmm7, %xmm7" );
+                 }
+                 else
+                 {
+-                    /* vpor %xmmN, %xmmN, %xmmN */
+-                    asm volatile ( ".byte 0xc5,0xf9,0xeb,0xc0" );
+-                    asm volatile ( ".byte 0xc5,0xf1,0xeb,0xc9" );
+-                    asm volatile ( ".byte 0xc5,0xe9,0xeb,0xd2" );
+-                    asm volatile ( ".byte 0xc5,0xe1,0xeb,0xdb" );
+-                    asm volatile ( ".byte 0xc5,0xd9,0xeb,0xe4" );
+-                    asm volatile ( ".byte 0xc5,0xd1,0xeb,0xed" );
+-                    asm volatile ( ".byte 0xc5,0xc9,0xeb,0xf6" );
+-                    asm volatile ( ".byte 0xc5,0xc1,0xeb,0xff" );
++                    asm volatile ( "vpor %xmm0, %xmm0, %xmm0" );
++                    asm volatile ( "vpor %xmm1, %xmm1, %xmm1" );
++                    asm volatile ( "vpor %xmm2, %xmm2, %xmm2" );
++                    asm volatile ( "vpor %xmm3, %xmm3, %xmm3" );
++                    asm volatile ( "vpor %xmm4, %xmm4, %xmm4" );
++                    asm volatile ( "vpor %xmm5, %xmm5, %xmm5" );
++                    asm volatile ( "vpor %xmm6, %xmm6, %xmm6" );
++                    asm volatile ( "vpor %xmm7, %xmm7, %xmm7" );
+                 }
+ 
+                 ASSERT(!state->simd_size);
+-- 
+2.39.5
+
+
+
+
