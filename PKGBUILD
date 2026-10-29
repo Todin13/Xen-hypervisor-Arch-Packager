@@ -29,7 +29,7 @@ install="xen.install"
 
 
 # Dependencies
-makedepends=('zlib' 'python' 'ncurses' 'openssl' 'libx11' 'libuuid.so' 'yajl' 'libaio' 'glib2' 'pkgconf' 'git' 'iproute2' 'inetutils' 'acpica' 'lib32-glibc' 'gnutls' 'vde2' 'lzo' 'pciutils' 'sdl2' 'systemd-libs' 'systemd' 'wget' 'pandoc' 'valgrind' 'git' 'bison' 'gettext' 'flex' 'pixman' 'fig2dev' 'python-setuptools')
+makedepends=('zlib' 'python' 'ncurses' 'openssl' 'libx11' 'libuuid.so' 'yajl' 'libaio' 'glib2' 'pkgconf' 'git' 'iproute2' 'inetutils' 'acpica' 'lib32-glibc' 'gnutls' 'vde2' 'lzo' 'pciutils' 'sdl2' 'systemd-libs' 'systemd' 'wget' 'pandoc' 'valgrind' 'git' 'bison' 'gettext' 'flex' 'pixman' 'fig2dev' 'python-setuptools' 'bear')
 depends=('zlib' 'python' 'ncurses' 'openssl' 'libx11' 'libuuid.so' 'yajl' 'libaio' 'glib2' 'pkgconf' 'iproute2' 'inetutils' 'acpica' 'lib32-glibc' 'gnutls' 'vde2' 'lzo' 'pciutils' 'sdl2' 'pixman' 'libseccomp' 'libpng' 'libjpeg-turbo')
 
 _source=(
@@ -122,7 +122,7 @@ build() {
         --disable-ocamltools \
         --disable-pygrub
 
-    make "${_make_flags[@]}"
+    bear -- make "${_make_flags[@]}"
 }
 
 package() {
